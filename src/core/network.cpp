@@ -98,7 +98,8 @@ QNetworkReply* NetworkAccessManager::createRequest(
   if (request.hasRawHeader("User-Agent")) {
     // Append the existing user-agent set by a client library (such as
     // libmygpo-qt).
-    user_agent += " " + request.rawHeader("User-Agent");
+    //user_agent = " " + request.rawHeader("User-Agent");
+      user_agent = request.rawHeader("User-Agent");
   }
 
   QNetworkRequest new_request(request);

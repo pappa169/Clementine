@@ -25,6 +25,7 @@
 #include <QNetworkReply>
 #include <QTextCodec>
 #include <QThread>
+#include <QApplication>
 
 const int UltimateLyricsProvider::kRedirectLimit = 5;
 
@@ -46,6 +47,7 @@ void UltimateLyricsProvider::FetchInfo(int id, const Song& metadata) {
 
   // Fill in fields in the URL
   QString url_text(url_);
+  qLog(Debug) << "URL:" << url_text;
   ReplaceFields(metadata, &url_text);
 
   QUrl url(url_text);
@@ -54,7 +56,13 @@ void UltimateLyricsProvider::FetchInfo(int id, const Song& metadata) {
   // Fetch the URL, follow redirects
   metadata_ = metadata;
   redirect_count_ = 0;
-  QNetworkReply* reply = network_->get(QNetworkRequest(url));
+  QNetworkRequest request;
+//  request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+//              QNetworkRequest::AlwaysNetwork);
+  request.setUrl(QUrl(url));
+//  request.setRawHeader("Accept", "*/*" );
+  request.setRawHeader("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:58.0) Gecko/20100101 Firefox/58.0");
+  QNetworkReply* reply = network_->get(request);
   requests_[reply] = id;
   connect(reply, SIGNAL(finished()), SLOT(LyricsFetched()));
 }
@@ -70,6 +78,7 @@ void UltimateLyricsProvider::LyricsFetched() {
   reply->deleteLater();
 
   if (reply->error() != QNetworkReply::NoError) {
+    qLog(Debug) << "QNetworkReply error:" << reply->errorString();
     url_hop_ = false;
     emit Finished(id);
     return;
