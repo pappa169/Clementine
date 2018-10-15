@@ -42,6 +42,7 @@
 #include <QTimeLine>
 
 #include <math.h>
+#include <algorithm>
 
 #ifdef HAVE_MOODBAR
 #include "moodbar/moodbaritemdelegate.h"
@@ -112,6 +113,7 @@ PlaylistView::PlaylistView(QWidget* parent)
       upgrading_from_qheaderview_(false),
       read_only_settings_(true),
       upgrading_from_version_(-1),
+      background_initialized_(false),
       background_image_type_(Default),
       blur_radius_(kDefaultBlurRadius),
       opacity_level_(kDefaultOpacityLevel),
@@ -120,7 +122,7 @@ PlaylistView::PlaylistView(QWidget* parent)
       last_height_(-1),
       last_width_(-1),
       force_background_redraw_(false),
-      glow_enabled_(true),
+      glow_enabled_(false),
       currently_glowing_(false),
       glow_intensity_step_(0),
       rating_delegate_(nullptr),
@@ -654,7 +656,7 @@ void PlaylistView::RemoveSelected(bool deleting_from_disk) {
 
   // Sort the selection so we remove the items at the *bottom* first, ensuring
   // we don't have to mess around with changing row numbers
-  qSort(selection.begin(), selection.end(), CompareSelectionRanges);
+  std::sort(selection.begin(), selection.end(), CompareSelectionRanges);
 
   for (const QItemSelectionRange& range : selection) {
     if (range.top() < last_row) rows_removed += range.height();
@@ -697,7 +699,7 @@ QList<int> PlaylistView::GetEditableColumns() {
     QModelIndex index = model()->index(0, col);
     if (index.flags() & Qt::ItemIsEditable) columns << h->visualIndex(col);
   }
-  qSort(columns);
+  std::sort(columns.begin(), columns.end());
   return columns;
 }
 
@@ -840,6 +842,10 @@ void PlaylistView::mousePressEvent(QMouseEvent* event) {
       // Update only this item rating
       playlist_->RateSong(playlist_->proxy()->mapToSource(index), new_rating);
     }
+  } else if (event->button() == Qt::XButton1 && index.isValid()) {
+    app_->player()->Previous();
+  } else if (event->button() == Qt::XButton2 && index.isValid()) {
+    app_->player()->Next();
   } else {
     QTreeView::mousePressEvent(event);
   }
@@ -1071,7 +1077,7 @@ void PlaylistView::PlaylistDestroyed() {
 void PlaylistView::ReloadSettings() {
   QSettings s;
   s.beginGroup(Playlist::kSettingsGroup);
-  glow_enabled_ = s.value("glow_effect", true).toBool();
+  glow_enabled_ = s.value("glow_effect", false).toBool();
 
   if (setting_initial_header_layout_ || upgrading_from_qheaderview_) {
     header_->SetStretchEnabled(s.value("stretch", true).toBool());
@@ -1127,10 +1133,12 @@ void PlaylistView::ReloadSettings() {
   // set_background_image when it is not needed, as this will cause the fading
   // animation to start again. This also avoid to do useless
   // "force_background_redraw".
-  if (background_image_filename != background_image_filename_ ||
+  if (background_initialized_ == false ||
+      background_image_filename != background_image_filename_ ||
       background_type != background_image_type_ ||
       blur_radius_ != blur_radius || opacity_level_ != opacity_level) {
     // Store background properties
+    background_initialized_ = true;
     background_image_type_ = background_type;
     background_image_filename_ = background_image_filename;
     blur_radius_ = blur_radius;

@@ -104,6 +104,9 @@ message SongMetadata {
     TRUEAUDIO = 11;
     CDDA = 12;
     OGGOPUS = 13;
+    WAVPACK = 14;
+    SPC = 15;
+    VGM = 16;
     STREAM = 99;
   }
 

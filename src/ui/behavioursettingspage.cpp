@@ -22,7 +22,10 @@
 #include "playlist/playlist.h"
 #include "playlist/playlisttabbar.h"
 
+#include <algorithm>
+
 #include <QDir>
+#include <QSystemTrayIcon>
 
 namespace {
 bool LocaleAwareCompare(const QString& a, const QString& b) {
@@ -90,12 +93,20 @@ BehaviourSettingsPage::BehaviourSettingsPage(SettingsDialog* dialog)
 
   // Sort the names and show them in the UI
   QStringList names = language_map_.keys();
-  qStableSort(names.begin(), names.end(), LocaleAwareCompare);
+  std::stable_sort(names.begin(), names.end(), LocaleAwareCompare);
   ui_->language->addItems(names);
 
 #ifdef Q_OS_DARWIN
   ui_->b_show_tray_icon_->setEnabled(false);
   ui_->startup_group_->setEnabled(false);
+#else
+  if (QSystemTrayIcon::isSystemTrayAvailable()) {
+    ui_->b_show_tray_icon_->setEnabled(true);
+    ui_->startup_group_->setEnabled(true);
+  } else {
+    ui_->b_show_tray_icon_->setEnabled(false);
+    ui_->startup_group_->setEnabled(false);
+  }
 #endif
 }
 
@@ -105,11 +116,25 @@ void BehaviourSettingsPage::Load() {
   QSettings s;
 
   s.beginGroup(MainWindow::kSettingsGroup);
-  ui_->b_show_tray_icon_->setChecked(s.value("showtray", true).toBool());
-  ui_->b_scroll_tray_icon_->setChecked(
-      s.value("scrolltrayicon", ui_->b_show_tray_icon_->isChecked()).toBool());
-  ui_->b_keep_running_->setChecked(
-      s.value("keeprunning", ui_->b_show_tray_icon_->isChecked()).toBool());
+#ifdef Q_OS_DARWIN
+  ui_->b_show_tray_icon_->setChecked(false);
+  ui_->b_scroll_tray_icon_->setChecked(false);
+  ui_->b_keep_running_->setChecked(false);
+#else
+  if (QSystemTrayIcon::isSystemTrayAvailable()) {
+    ui_->b_show_tray_icon_->setChecked(s.value("showtray", true).toBool());
+    ui_->b_scroll_tray_icon_->setChecked(
+        s.value("scrolltrayicon", ui_->b_show_tray_icon_->isChecked())
+            .toBool());
+    ui_->b_keep_running_->setChecked(
+        s.value("keeprunning", ui_->b_show_tray_icon_->isChecked()).toBool());
+  } else {
+    ui_->b_show_tray_icon_->setChecked(false);
+    ui_->b_scroll_tray_icon_->setChecked(false);
+    ui_->b_keep_running_->setChecked(false);
+  }
+#endif
+
   ui_->doubleclick_addmode->setCurrentIndex(ui_->doubleclick_addmode->findData(
       s.value("doubleclick_addmode", MainWindow::AddBehaviour_Append).toInt()));
   ui_->doubleclick_playmode->setCurrentIndex(
@@ -180,6 +205,11 @@ void BehaviourSettingsPage::Load() {
   }
   ui_->b_write_metadata->setChecked(
       s.value(Playlist::kWriteMetadata, true).toBool());
+
+  ui_->sort_ignore_prefix->setChecked(
+      s.value(Playlist::kSortIgnorePrefix, true).toBool());
+  ui_->sort_ignore_prefix_list->setText(
+      s.value(Playlist::kSortIgnorePrefixList, QString("a, the")).toString());
   s.endGroup();
 
   s.beginGroup(PlaylistTabBar::kSettingsGroup);
@@ -260,6 +290,9 @@ void BehaviourSettingsPage::Save() {
   s.setValue("click_edit_inline", ui_->b_click_edit_inline_->isChecked());
   s.setValue(Playlist::kPathType, static_cast<int>(path));
   s.setValue(Playlist::kWriteMetadata, ui_->b_write_metadata->isChecked());
+  s.setValue(Playlist::kSortIgnorePrefix, ui_->sort_ignore_prefix->isChecked());
+  s.setValue(Playlist::kSortIgnorePrefixList,
+             ui_->sort_ignore_prefix_list->text());
   s.endGroup();
 
   s.beginGroup(PlaylistTabBar::kSettingsGroup);

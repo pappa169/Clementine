@@ -21,7 +21,6 @@
 #include <QDir>
 #include <QPair>
 #include <QRegExp>
-#include <QUuid>
 
 #include "bufferconsumer.h"
 #include "config.h"
@@ -157,8 +156,9 @@ bool GstEnginePipeline::ReplaceDecodeBin(const QUrl& url) {
 
     // Create elements
     GstElement* src = engine_->CreateElement("tcpserversrc", new_bin);
+    if (!src) return false;
     GstElement* gdp = engine_->CreateElement("gdpdepay", new_bin);
-    if (!src || !gdp) return false;
+    if (!gdp) return false;
 
     // Pick a port number
     const int port = Utilities::PickUnusedPort();
@@ -182,6 +182,7 @@ bool GstEnginePipeline::ReplaceDecodeBin(const QUrl& url) {
         Q_ARG(QString, url.toString()), Q_ARG(quint16, port));
   } else {
     new_bin = engine_->CreateElement("uridecodebin");
+    if (!new_bin) return false;
     g_object_set(G_OBJECT(new_bin), "uri", url.toEncoded().constData(),
                  nullptr);
     CHECKED_GCONNECT(G_OBJECT(new_bin), "drained", &SourceDrainedCallback,
@@ -247,18 +248,19 @@ bool GstEnginePipeline::Init() {
       case QVariant::Int:
         g_object_set(G_OBJECT(audiosink_), "device", device_.toInt(), nullptr);
         break;
+      case QVariant::LongLong:
+        g_object_set(G_OBJECT(audiosink_), "device", device_.toLongLong(),
+                     nullptr);
+        break;
       case QVariant::String:
         g_object_set(G_OBJECT(audiosink_), "device",
                      device_.toString().toUtf8().constData(), nullptr);
         break;
-
-#ifdef Q_OS_WIN32
       case QVariant::ByteArray: {
-        GUID guid = QUuid(device_.toByteArray());
-        g_object_set(G_OBJECT(audiosink_), "device", &guid, nullptr);
+        g_object_set(G_OBJECT(audiosink_), "device",
+                     device_.toByteArray().constData(), nullptr);
         break;
       }
-#endif  // Q_OS_WIN32
 
       default:
         qLog(Warning) << "Unknown device type" << device_;
@@ -274,7 +276,7 @@ bool GstEnginePipeline::Init() {
   audioconvert_ = engine_->CreateElement("audioconvert", audiobin_);
   tee = engine_->CreateElement("tee", audiobin_);
 
-  probe_queue = engine_->CreateElement("queue", audiobin_);
+  probe_queue = engine_->CreateElement("queue2", audiobin_);
   probe_converter = engine_->CreateElement("audioconvert", audiobin_);
   probe_sink = engine_->CreateElement("fakesink", audiobin_);
 
@@ -898,7 +900,8 @@ GstPadProbeReturn GstEnginePipeline::HandoffCallback(GstPad*,
 
   if (instance->emit_track_ended_on_time_discontinuity_) {
     if (GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_DISCONT) ||
-        GST_BUFFER_OFFSET(buf) < instance->last_buffer_offset_) {
+        GST_BUFFER_OFFSET(buf) < instance->last_buffer_offset_ ||
+        !GST_BUFFER_OFFSET_IS_VALID(buf)) {
       qLog(Debug) << "Buffer discontinuity - emitting EOS";
       instance->emit_track_ended_on_time_discontinuity_ = false;
       emit instance->EndOfStreamReached(instance->id(), true);

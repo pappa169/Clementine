@@ -33,6 +33,7 @@
 #include <QSignalMapper>
 #include <QSortFilterProxyModel>
 #include <QStatusBar>
+#include <QSystemTrayIcon>
 #include <QTimer>
 #include <QUndoStack>
 #include <QtDebug>
@@ -147,6 +148,7 @@
 #include "moodbar/moodbarproxystyle.h"
 #endif
 
+#include <algorithm>
 #include <cmath>
 
 #ifdef Q_OS_DARWIN
@@ -158,7 +160,7 @@ const char* MainWindow::kSettingsGroup = "MainWindow";
 const char* MainWindow::kAllFilesFilterSpec = QT_TR_NOOP("All Files (*)");
 
 namespace {
-const int kTrackSliderUpdateTimeMs = 40;
+const int kTrackSliderUpdateTimeMs = 500;
 const int kTrackPositionUpdateTimeMs = 1000;
 }
 
@@ -612,6 +614,10 @@ MainWindow::MainWindow(Application* app, SystemTrayIcon* tray_icon, OSD* osd,
   connect(ui_->track_slider, SIGNAL(SeekBackward()), app_->player(),
           SLOT(SeekBackward()));
 
+  connect(ui_->track_slider, SIGNAL(Previous()), app_->player(),
+          SLOT(Previous()));
+  connect(ui_->track_slider, SIGNAL(Next()), app_->player(), SLOT(Next()));
+
   // Library connections
   connect(library_view_->view(), SIGNAL(AddToPlaylistSignal(QMimeData*)),
           SLOT(AddToPlaylist(QMimeData*)));
@@ -677,6 +683,10 @@ MainWindow::MainWindow(Application* app, SystemTrayIcon* tray_icon, OSD* osd,
   playlist_queue_ = playlist_menu_->addAction("", this, SLOT(PlaylistQueue()));
   playlist_queue_->setShortcut(QKeySequence("Ctrl+D"));
   ui_->playlist->addAction(playlist_queue_);
+  playlist_queue_play_next_ =
+      playlist_menu_->addAction("", this, SLOT(PlaylistQueuePlayNext()));
+  playlist_queue_play_next_->setShortcut(QKeySequence("Ctrl+Shift+D"));
+  ui_->playlist->addAction(playlist_queue_play_next_);
   playlist_skip_ = playlist_menu_->addAction("", this, SLOT(PlaylistSkip()));
   ui_->playlist->addAction(playlist_skip_);
   playlist_menu_->addSeparator();
@@ -784,20 +794,22 @@ MainWindow::MainWindow(Application* app, SystemTrayIcon* tray_icon, OSD* osd,
   mac::SetApplicationHandler(this);
 #endif
   // Tray icon
-  tray_icon_->SetupMenu(ui_->action_previous_track, ui_->action_play_pause,
-                        ui_->action_stop, ui_->action_stop_after_this_track,
-                        ui_->action_next_track, ui_->action_mute,
-                        ui_->action_love, ui_->action_quit);
-  connect(tray_icon_, SIGNAL(PlayPause()), app_->player(), SLOT(PlayPause()));
-  connect(tray_icon_, SIGNAL(SeekForward()), app_->player(),
-          SLOT(SeekForward()));
-  connect(tray_icon_, SIGNAL(SeekBackward()), app_->player(),
-          SLOT(SeekBackward()));
-  connect(tray_icon_, SIGNAL(NextTrack()), app_->player(), SLOT(Next()));
-  connect(tray_icon_, SIGNAL(PreviousTrack()), app_->player(),
-          SLOT(Previous()));
-  connect(tray_icon_, SIGNAL(ShowHide()), SLOT(ToggleShowHide()));
-  connect(tray_icon_, SIGNAL(ChangeVolume(int)), SLOT(VolumeWheelEvent(int)));
+  if (tray_icon_) {
+    tray_icon_->SetupMenu(ui_->action_previous_track, ui_->action_play_pause,
+                          ui_->action_stop, ui_->action_stop_after_this_track,
+                          ui_->action_next_track, ui_->action_mute,
+                          ui_->action_love, ui_->action_quit);
+    connect(tray_icon_, SIGNAL(PlayPause()), app_->player(), SLOT(PlayPause()));
+    connect(tray_icon_, SIGNAL(SeekForward()), app_->player(),
+            SLOT(SeekForward()));
+    connect(tray_icon_, SIGNAL(SeekBackward()), app_->player(),
+            SLOT(SeekBackward()));
+    connect(tray_icon_, SIGNAL(NextTrack()), app_->player(), SLOT(Next()));
+    connect(tray_icon_, SIGNAL(PreviousTrack()), app_->player(),
+            SLOT(Previous()));
+    connect(tray_icon_, SIGNAL(ShowHide()), SLOT(ToggleShowHide()));
+    connect(tray_icon_, SIGNAL(ChangeVolume(int)), SLOT(VolumeWheelEvent(int)));
+  }
 
   // Windows 7 thumbbar buttons
   thumbbar_->SetActions(QList<QAction*>()
@@ -1007,7 +1019,10 @@ MainWindow::MainWindow(Application* app, SystemTrayIcon* tray_icon, OSD* osd,
   // Reload playlist settings, for BG and glowing
   ui_->playlist->view()->ReloadSettings();
 
-#ifndef Q_OS_DARWIN
+#ifdef Q_OS_DARWIN
+  // Always show mainwindow on startup on OS X.
+  show();
+#else
   StartupBehaviour behaviour = StartupBehaviour(
       settings_.value("startupbehaviour", Startup_Remember).toInt());
   bool hidden = settings_.value("hidden", false).toBool();
@@ -1026,13 +1041,11 @@ MainWindow::MainWindow(Application* app, SystemTrayIcon* tray_icon, OSD* osd,
 
   // Force the window to show in case somehow the config has tray and window set
   // to hide
-  if (hidden && !tray_icon_->IsVisible()) {
+  if (hidden && (!QSystemTrayIcon::isSystemTrayAvailable() || !tray_icon_ ||
+                 !tray_icon_->IsVisible())) {
     settings_.setValue("hidden", false);
     show();
   }
-#else  // Q_OS_DARWIN
-  // Always show mainwindow on startup on OS X.
-  show();
 #endif
 
   QShortcut* close_window_shortcut = new QShortcut(this);
@@ -1063,10 +1076,13 @@ MainWindow::~MainWindow() {
 
 void MainWindow::ReloadSettings() {
 #ifndef Q_OS_DARWIN
-  bool show_tray = settings_.value("showtray", true).toBool();
+  bool show_tray =
+      settings_.value("showtray", QSystemTrayIcon::isSystemTrayAvailable())
+          .toBool();
 
-  tray_icon_->SetVisible(show_tray);
-  if (!show_tray && !isVisible()) show();
+  if (tray_icon_) tray_icon_->SetVisible(show_tray);
+  if ((!show_tray || !QSystemTrayIcon::isSystemTrayAvailable()) && !isVisible())
+    show();
 #endif
 
   QSettings s;
@@ -1120,13 +1136,15 @@ void MainWindow::MediaStopped() {
   ui_->action_play_pause->setEnabled(true);
 
   ui_->action_love->setEnabled(false);
-  tray_icon_->LastFMButtonLoveStateChanged(false);
+  if (tray_icon_) tray_icon_->LastFMButtonLoveStateChanged(false);
 
   track_position_timer_->stop();
   track_slider_timer_->stop();
   ui_->track_slider->SetStopped();
-  tray_icon_->SetProgress(0);
-  tray_icon_->SetStopped();
+  if (tray_icon_) {
+    tray_icon_->SetProgress(0);
+    tray_icon_->SetStopped();
+  }
 }
 
 void MainWindow::MediaPaused() {
@@ -1141,7 +1159,7 @@ void MainWindow::MediaPaused() {
   track_position_timer_->stop();
   track_slider_timer_->stop();
 
-  tray_icon_->SetPaused();
+  if (tray_icon_) tray_icon_->SetPaused();
 }
 
 void MainWindow::MediaPlaying() {
@@ -1162,10 +1180,12 @@ void MainWindow::MediaPlaying() {
 #ifdef HAVE_LIBLASTFM
   bool enable_love = app_->scrobbler()->IsScrobblingEnabled();
   ui_->action_love->setEnabled(enable_love);
-  tray_icon_->LastFMButtonLoveStateChanged(enable_love);
-  tray_icon_->SetPlaying(enable_play_pause, enable_love);
+  if (tray_icon_) {
+    tray_icon_->LastFMButtonLoveStateChanged(enable_love);
+    tray_icon_->SetPlaying(enable_play_pause, enable_love);
+  }
 #else
-  tray_icon_->SetPlaying(enable_play_pause);
+  if (tray_icon_) tray_icon_->SetPlaying(enable_play_pause);
 #endif
 
   track_position_timer_->start();
@@ -1175,12 +1195,12 @@ void MainWindow::MediaPlaying() {
 
 void MainWindow::VolumeChanged(int volume) {
   ui_->action_mute->setChecked(!volume);
-  tray_icon_->MuteButtonStateChanged(!volume);
+  if (tray_icon_) tray_icon_->MuteButtonStateChanged(!volume);
 }
 
 void MainWindow::SongChanged(const Song& song) {
   setWindowTitle(song.PrettyTitleWithArtist());
-  tray_icon_->SetProgress(0);
+  if (tray_icon_) tray_icon_->SetProgress(0);
 
 #ifdef HAVE_LIBLASTFM
   if (ui_->action_toggle_scrobbling->isVisible())
@@ -1229,14 +1249,14 @@ void MainWindow::ScrobblingEnabledChanged(bool value) {
   }
 
   ui_->action_love->setEnabled(value);
-  tray_icon_->LastFMButtonLoveStateChanged(value);
+  if (tray_icon_) tray_icon_->LastFMButtonLoveStateChanged(value);
 }
 #endif
 
 void MainWindow::LastFMButtonVisibilityChanged(bool value) {
   ui_->action_love->setVisible(value);
   ui_->last_fm_controls->setVisible(value);
-  tray_icon_->LastFMButtonVisibilityChanged(value);
+  if (tray_icon_) tray_icon_->LastFMButtonVisibilityChanged(value);
 }
 
 void MainWindow::ScrobbleButtonVisibilityChanged(bool value) {
@@ -1406,13 +1426,15 @@ void MainWindow::closeEvent(QCloseEvent* event) {
   QSettings s;
   s.beginGroup(kSettingsGroup);
 
-  bool keep_running = s.value("keeprunning", tray_icon_->IsVisible()).toBool();
+  bool keep_running(false);
+  if (tray_icon_)
+    keep_running = s.value("keeprunning", tray_icon_->IsVisible()).toBool();
 
   if (keep_running && event->spontaneous()) {
     event->ignore();
     SetHiddenInTray(true);
   } else {
-    QApplication::quit();
+    Exit();
   }
 }
 
@@ -1440,7 +1462,7 @@ void MainWindow::Seeked(qlonglong microseconds) {
   const int length =
       app_->player()->GetCurrentItem()->Metadata().length_nanosec() /
       kNsecPerSec;
-  tray_icon_->SetProgress(double(position) / length * 100);
+  if (tray_icon_) tray_icon_->SetProgress(double(position) / length * 100);
 
   // if we seeked, scrobbling is canceled, update the icon
   if (ui_->action_toggle_scrobbling->isVisible()) SetToggleScrobblingIcon(true);
@@ -1499,7 +1521,7 @@ void MainWindow::UpdateTrackPosition() {
   if (position % 10 == 0) {
     qLog(Debug) << "position" << position << "scrobble point" << scrobble_point
                 << "status" << playlist->get_lastfm_status();
-    tray_icon_->SetProgress(double(position) / length * 100);
+    if (tray_icon_) tray_icon_->SetProgress(double(position) / length * 100);
 
 // if we're waiting for the scrobble point, update the icon
 #ifdef HAVE_LIBLASTFM
@@ -1528,13 +1550,13 @@ void MainWindow::UpdateTrackSliderPosition() {
 #ifdef HAVE_LIBLASTFM
 void MainWindow::ScrobbledRadioStream() {
   ui_->action_love->setEnabled(true);
-  tray_icon_->LastFMButtonLoveStateChanged(true);
+  if (tray_icon_) tray_icon_->LastFMButtonLoveStateChanged(true);
 }
 
 void MainWindow::Love() {
   app_->scrobbler()->Love();
   ui_->action_love->setEnabled(false);
-  tray_icon_->LastFMButtonLoveStateChanged(false);
+  if (tray_icon_) tray_icon_->LastFMButtonLoveStateChanged(false);
 }
 #endif
 
@@ -1760,6 +1782,11 @@ void MainWindow::PlaylistRightClick(const QPoint& global_pos,
   else
     playlist_queue_->setText(tr("Toggle queue status"));
 
+  if (all > 1)
+    playlist_queue_play_next_->setText(tr("Play selected tracks next"));
+  else
+    playlist_queue_play_next_->setText(tr("Play next"));
+
   if (in_skipped == 1 && not_in_skipped == 0)
     playlist_skip_->setText(tr("Unskip track"));
   else if (in_skipped > 1 && not_in_skipped == 0)
@@ -1773,6 +1800,9 @@ void MainWindow::PlaylistRightClick(const QPoint& global_pos,
     playlist_queue_->setIcon(IconLoader::Load("go-previous", IconLoader::Base));
   else
     playlist_queue_->setIcon(IconLoader::Load("go-next", IconLoader::Base));
+
+  playlist_queue_play_next_->setIcon(
+      IconLoader::Load("go-next", IconLoader::Base));
 
   if (!index.isValid()) {
     ui_->action_selection_set_value->setVisible(false);
@@ -1933,7 +1963,7 @@ void MainWindow::RenumberTracks() {
   int track = 1;
 
   // Get the index list in order
-  qStableSort(indexes);
+  std::stable_sort(indexes.begin(), indexes.end());
 
   // if first selected song has a track number set, start from that offset
   if (!indexes.isEmpty()) {
@@ -2158,7 +2188,7 @@ void MainWindow::CommandlineOptionsReceived(
 
 void MainWindow::CommandlineOptionsReceived(const CommandlineOptions& options) {
   qLog(Debug) << "command line options received";
-  
+
   switch (options.player_action()) {
     case CommandlineOptions::Player_Play:
       if (options.urls().empty()) {
@@ -2240,21 +2270,21 @@ void MainWindow::CommandlineOptionsReceived(const CommandlineOptions& options) {
 
   qLog(Debug) << options.delete_current_track();
 
-  // Just pass the url of the currently playing 
+  // Just pass the url of the currently playing
   if (options.delete_current_track()) {
     qLog(Debug) << "deleting current track";
-    
+
     Playlist* activePlaylist = app_->playlist_manager()->active();
     PlaylistItemPtr playlistItemPtr = activePlaylist->current_item();
 
     if (playlistItemPtr) {
       const QUrl& url = playlistItemPtr->Url();
       qLog(Debug) << url;
-      
-      std::shared_ptr<MusicStorage> storage(new FilesystemMusicStorage("/"));  
-      
+
+      std::shared_ptr<MusicStorage> storage(new FilesystemMusicStorage("/"));
+
       app_->player()->Next();
-        
+
       DeleteFiles* delete_files = new DeleteFiles(app_->task_manager(), storage);
       connect(delete_files, SIGNAL(Finished(SongList)),
               SLOT(DeleteFinished(SongList)));
@@ -2264,7 +2294,7 @@ void MainWindow::CommandlineOptionsReceived(const CommandlineOptions& options) {
       qLog(Debug) << "no currently playing track to delete";
     }
   }
-  
+
   if (options.show_osd()) app_->player()->ShowOSD();
 
   if (options.toggle_pretty_osd()) app_->player()->TogglePrettyOSD();
@@ -2480,9 +2510,9 @@ void MainWindow::DeleteFinished(const SongList& songs_with_errors) {
       activePlaylist->RemoveUnavailableSongs();
       qLog(Debug) << "Found active playlist and removed unavailable songs";
     }
-    
+
     return;
-  } 
+  }
 
   OrganiseErrorDialog* dialog = new OrganiseErrorDialog(this);
   dialog->Show(OrganiseErrorDialog::Type_Delete, songs_with_errors);
@@ -2498,6 +2528,17 @@ void MainWindow::PlaylistQueue() {
   }
 
   app_->playlist_manager()->current()->queue()->ToggleTracks(indexes);
+}
+
+void MainWindow::PlaylistQueuePlayNext() {
+  QModelIndexList indexes;
+  for (const QModelIndex& proxy_index :
+       ui_->playlist->view()->selectionModel()->selectedRows()) {
+    indexes << app_->playlist_manager()->current()->proxy()->mapToSource(
+        proxy_index);
+  }
+
+  app_->playlist_manager()->current()->queue()->InsertFirst(indexes);
 }
 
 void MainWindow::PlaylistSkip() {
@@ -2748,7 +2789,7 @@ void MainWindow::Exit() {
     if (app_->player()->GetState() == Engine::Playing) {
       app_->player()->Stop();
       hide();
-      tray_icon_->SetVisible(false);
+      if (tray_icon_) tray_icon_->SetVisible(false);
       return;  // Don't quit the application now: wait for the fadeout finished
                // signal
     }

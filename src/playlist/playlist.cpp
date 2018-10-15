@@ -90,12 +90,25 @@ const char* Playlist::kSettingsGroup = "Playlist";
 
 const char* Playlist::kPathType = "path_type";
 const char* Playlist::kWriteMetadata = "write_metadata";
+const char* Playlist::kSortIgnorePrefix = "sort_ignore_prefix";
+const char* Playlist::kSortIgnorePrefixList = "sort_ignore_prefix_list";
 
 const int Playlist::kUndoStackSize = 20;
 const int Playlist::kUndoItemLimit = 500;
 
 const qint64 Playlist::kMinScrobblePointNsecs = 31ll * kNsecPerSec;
 const qint64 Playlist::kMaxScrobblePointNsecs = 240ll * kNsecPerSec;
+
+namespace {
+QString removePrefix(const QString& a, const QStringList& prefixes) {
+  for (const QString& prefix : prefixes) {
+    if (a.startsWith(prefix)) {
+      return a.mid(prefix.size());
+    }
+  }
+  return a;
+}
+}  // namespace
 
 Playlist::Playlist(PlaylistBackend* backend, TaskManager* task_manager,
                    LibraryBackend* library, int id, const QString& special_type,
@@ -152,14 +165,14 @@ Playlist::~Playlist() {
 
 template <typename T>
 void Playlist::InsertSongItems(const SongList& songs, int pos, bool play_now,
-                               bool enqueue) {
+                               bool enqueue, bool enqueue_next) {
   PlaylistItemList items;
 
   for (const Song& song : songs) {
     items << PlaylistItemPtr(new T(song));
   }
 
-  InsertItems(items, pos, play_now, enqueue);
+  InsertItems(items, pos, play_now, enqueue, enqueue_next);
 }
 
 QVariant Playlist::headerData(int section, Qt::Orientation, int role) const {
@@ -703,7 +716,7 @@ void Playlist::InsertDynamicItems(int count) {
   connect(inserter, SIGNAL(PlayRequested(QModelIndex)),
           SIGNAL(PlayRequested(QModelIndex)));
 
-  inserter->Load(this, -1, false, false, dynamic_playlist_, count);
+  inserter->Load(this, -1, false, false, false, dynamic_playlist_, count);
 }
 
 Qt::ItemFlags Playlist::flags(const QModelIndex& index) const {
@@ -733,12 +746,14 @@ bool Playlist::dropMimeData(const QMimeData* data, Qt::DropAction action,
 
   bool play_now = false;
   bool enqueue_now = false;
+  bool enqueue_next_now = false;
   if (const MimeData* mime_data = qobject_cast<const MimeData*>(data)) {
     if (mime_data->clear_first_) {
       Clear();
     }
     play_now = mime_data->play_now_;
     enqueue_now = mime_data->enqueue_now_;
+    enqueue_next_now = mime_data->enqueue_next_now_;
   }
 
   if (const SongMimeData* song_data = qobject_cast<const SongMimeData*>(data)) {
@@ -748,33 +763,35 @@ bool Playlist::dropMimeData(const QMimeData* data, Qt::DropAction action,
     if (song_data->backend &&
         song_data->backend->songs_table() == Library::kSongsTable)
       InsertSongItems<LibraryPlaylistItem>(song_data->songs, row, play_now,
-                                           enqueue_now);
+                                           enqueue_now, enqueue_next_now);
     else if (song_data->backend &&
              song_data->backend->songs_table() == MagnatuneService::kSongsTable)
       InsertSongItems<MagnatunePlaylistItem>(song_data->songs, row, play_now,
-                                             enqueue_now);
+                                             enqueue_now, enqueue_next_now);
     else if (song_data->backend &&
              song_data->backend->songs_table() == JamendoService::kSongsTable)
       InsertSongItems<JamendoPlaylistItem>(song_data->songs, row, play_now,
-                                           enqueue_now);
+                                           enqueue_now, enqueue_next_now);
     else
       InsertSongItems<SongPlaylistItem>(song_data->songs, row, play_now,
-                                        enqueue_now);
+                                        enqueue_now, enqueue_next_now);
   } else if (const InternetMimeData* internet_data =
                  qobject_cast<const InternetMimeData*>(data)) {
     // Dragged from the Internet pane
     InsertInternetItems(internet_data->model, internet_data->indexes, row,
-                        play_now, enqueue_now);
+                        play_now, enqueue_now, enqueue_next_now);
   } else if (const InternetSongMimeData* internet_song_data =
                  qobject_cast<const InternetSongMimeData*>(data)) {
     InsertInternetItems(internet_song_data->service, internet_song_data->songs,
-                        row, play_now, enqueue_now);
+                        row, play_now, enqueue_now, enqueue_next_now);
   } else if (const GeneratorMimeData* generator_data =
                  qobject_cast<const GeneratorMimeData*>(data)) {
-    InsertSmartPlaylist(generator_data->generator_, row, play_now, enqueue_now);
+    InsertSmartPlaylist(generator_data->generator_, row, play_now, enqueue_now,
+                        enqueue_next_now);
   } else if (const PlaylistItemMimeData* item_data =
                  qobject_cast<const PlaylistItemMimeData*>(data)) {
-    InsertItems(item_data->items_, row, play_now, enqueue_now);
+    InsertItems(item_data->items_, row, play_now, enqueue_now,
+                enqueue_next_now);
   } else if (data->hasFormat(kRowsMimetype)) {
     // Dragged from the playlist
     // Rearranging it is tricky...
@@ -795,7 +812,8 @@ bool Playlist::dropMimeData(const QMimeData* data, Qt::DropAction action,
       pid = !own_pid;
     }
 
-    qStableSort(source_rows);  // Make sure we take them in order
+    std::stable_sort(source_rows.begin(),
+                     source_rows.end());  // Make sure we take them in order
 
     if (source_playlist == this) {
       // Dragged from this playlist - rearrange the items
@@ -809,7 +827,7 @@ bool Playlist::dropMimeData(const QMimeData* data, Qt::DropAction action,
       if (items.count() > kUndoItemLimit) {
         // Too big to keep in the undo stack. Also clear the stack because it
         // might have been invalidated.
-        InsertItemsWithoutUndo(items, row, false);
+        InsertItemsWithoutUndo(items, row, false, false);
         undo_stack_->clear();
       } else {
         undo_stack_->push(
@@ -828,26 +846,27 @@ bool Playlist::dropMimeData(const QMimeData* data, Qt::DropAction action,
     SongLoaderInserter* inserter = new SongLoaderInserter(
         task_manager_, library_, backend_->app()->player());
     connect(inserter, SIGNAL(Error(QString)), SIGNAL(Error(QString)));
-    inserter->LoadAudioCD(this, row, play_now, enqueue_now);
+    inserter->LoadAudioCD(this, row, play_now, enqueue_now, enqueue_next_now);
   } else if (data->hasUrls()) {
     // URL list dragged from the file list or some other app
-    InsertUrls(data->urls(), row, play_now, enqueue_now);
+    InsertUrls(data->urls(), row, play_now, enqueue_now, enqueue_next_now);
   }
 
   return true;
 }
 
 void Playlist::InsertUrls(const QList<QUrl>& urls, int pos, bool play_now,
-                          bool enqueue) {
+                          bool enqueue, bool enqueue_next) {
   SongLoaderInserter* inserter = new SongLoaderInserter(
       task_manager_, library_, backend_->app()->player());
   connect(inserter, SIGNAL(Error(QString)), SIGNAL(Error(QString)));
 
-  inserter->Load(this, pos, play_now, enqueue, urls);
+  inserter->Load(this, pos, play_now, enqueue, enqueue_next, urls);
 }
 
 void Playlist::InsertSmartPlaylist(GeneratorPtr generator, int pos,
-                                   bool play_now, bool enqueue) {
+                                   bool play_now, bool enqueue,
+                                   bool enqueue_next) {
   // Hack: If the generator hasn't got a library set then use the main one
   if (!generator->library()) {
     generator->set_library(library_);
@@ -857,7 +876,7 @@ void Playlist::InsertSmartPlaylist(GeneratorPtr generator, int pos,
       new GeneratorInserter(task_manager_, library_, this);
   connect(inserter, SIGNAL(Error(QString)), SIGNAL(Error(QString)));
 
-  inserter->Load(this, pos, play_now, enqueue, generator);
+  inserter->Load(this, pos, play_now, enqueue, enqueue_next, generator);
 
   if (generator->is_dynamic()) {
     TurnOnDynamicPlaylist(generator);
@@ -976,7 +995,7 @@ void Playlist::MoveItemsWithoutUndo(int start, const QList<int>& dest_rows) {
 }
 
 void Playlist::InsertItems(const PlaylistItemList& itemsIn, int pos,
-                           bool play_now, bool enqueue) {
+                           bool play_now, bool enqueue, bool enqueue_next) {
   if (itemsIn.isEmpty()) return;
 
   PlaylistItemList items = itemsIn;
@@ -1026,18 +1045,18 @@ void Playlist::InsertItems(const PlaylistItemList& itemsIn, int pos,
   if (items.count() > kUndoItemLimit) {
     // Too big to keep in the undo stack. Also clear the stack because it
     // might have been invalidated.
-    InsertItemsWithoutUndo(items, pos, enqueue);
+    InsertItemsWithoutUndo(items, pos, enqueue, enqueue_next);
     undo_stack_->clear();
   } else {
-    undo_stack_->push(
-        new PlaylistUndoCommands::InsertItems(this, items, pos, enqueue));
+    undo_stack_->push(new PlaylistUndoCommands::InsertItems(
+        this, items, pos, enqueue, enqueue_next));
   }
 
   if (play_now) emit PlayRequested(index(start, 0));
 }
 
 void Playlist::InsertItemsWithoutUndo(const PlaylistItemList& items, int pos,
-                                      bool enqueue) {
+                                      bool enqueue, bool enqueue_next) {
   if (items.isEmpty()) return;
 
   const int start = pos == -1 ? items_.count() : pos;
@@ -1072,22 +1091,33 @@ void Playlist::InsertItemsWithoutUndo(const PlaylistItemList& items, int pos,
     queue_->ToggleTracks(indexes);
   }
 
+  if (enqueue_next) {
+    QModelIndexList indexes;
+    for (int i = start; i <= end; ++i) {
+      indexes << index(i, 0);
+    }
+    queue_->InsertFirst(indexes);
+  }
+
   Save();
   ReshuffleIndices();
 }
 
 void Playlist::InsertLibraryItems(const SongList& songs, int pos, bool play_now,
-                                  bool enqueue) {
-  InsertSongItems<LibraryPlaylistItem>(songs, pos, play_now, enqueue);
+                                  bool enqueue, bool enqueue_next) {
+  InsertSongItems<LibraryPlaylistItem>(songs, pos, play_now, enqueue,
+                                       enqueue_next);
 }
 
 void Playlist::InsertSongs(const SongList& songs, int pos, bool play_now,
-                           bool enqueue) {
-  InsertSongItems<SongPlaylistItem>(songs, pos, play_now, enqueue);
+                           bool enqueue, bool enqueue_next) {
+  InsertSongItems<SongPlaylistItem>(songs, pos, play_now, enqueue,
+                                    enqueue_next);
 }
 
 void Playlist::InsertSongsOrLibraryItems(const SongList& songs, int pos,
-                                         bool play_now, bool enqueue) {
+                                         bool play_now, bool enqueue,
+                                         bool enqueue_next) {
   PlaylistItemList items;
   for (const Song& song : songs) {
     if (song.is_library_song()) {
@@ -1096,12 +1126,13 @@ void Playlist::InsertSongsOrLibraryItems(const SongList& songs, int pos,
       items << PlaylistItemPtr(new SongPlaylistItem(song));
     }
   }
-  InsertItems(items, pos, play_now, enqueue);
+  InsertItems(items, pos, play_now, enqueue, enqueue_next);
 }
 
 void Playlist::InsertInternetItems(const InternetModel* model,
                                    const QModelIndexList& items, int pos,
-                                   bool play_now, bool enqueue) {
+                                   bool play_now, bool enqueue,
+                                   bool enqueue_next) {
   PlaylistItemList playlist_items;
   QList<QUrl> song_urls;
 
@@ -1120,23 +1151,24 @@ void Playlist::InsertInternetItems(const InternetModel* model,
   }
 
   if (!song_urls.isEmpty()) {
-    InsertUrls(song_urls, pos, play_now, enqueue);
+    InsertUrls(song_urls, pos, play_now, enqueue, enqueue_next);
     play_now = false;
   }
 
-  InsertItems(playlist_items, pos, play_now, enqueue);
+  InsertItems(playlist_items, pos, play_now, enqueue, enqueue_next);
 }
 
 void Playlist::InsertInternetItems(InternetService* service,
                                    const SongList& songs, int pos,
-                                   bool play_now, bool enqueue) {
+                                   bool play_now, bool enqueue,
+                                   bool enqueue_next) {
   PlaylistItemList playlist_items;
   for (const Song& song : songs) {
     playlist_items << shared_ptr<PlaylistItem>(
         new InternetPlaylistItem(service, song));
   }
 
-  InsertItems(playlist_items, pos, play_now, enqueue);
+  InsertItems(playlist_items, pos, play_now, enqueue, enqueue_next);
 }
 
 void Playlist::UpdateItems(const SongList& songs) {
@@ -1229,14 +1261,16 @@ QMimeData* Playlist::mimeData(const QModelIndexList& indexes) const {
 
 bool Playlist::CompareItems(int column, Qt::SortOrder order,
                             shared_ptr<PlaylistItem> _a,
-                            shared_ptr<PlaylistItem> _b) {
+                            shared_ptr<PlaylistItem> _b,
+                            const QStringList& prefixes) {
   shared_ptr<PlaylistItem> a = order == Qt::AscendingOrder ? _a : _b;
   shared_ptr<PlaylistItem> b = order == Qt::AscendingOrder ? _b : _a;
 
 #define cmp(field) return a->Metadata().field() < b->Metadata().field()
 #define strcmp(field)                                                 \
-  return QString::localeAwareCompare(a->Metadata().field().toLower(), \
-                                     b->Metadata().field().toLower()) < 0;
+  return QString::localeAwareCompare(                                 \
+             removePrefix(a->Metadata().field().toLower(), prefixes), \
+             removePrefix(b->Metadata().field().toLower(), prefixes)) < 0;
 
   switch (column) {
     case Column_Title:
@@ -1414,25 +1448,44 @@ void Playlist::sort(int column, Qt::SortOrder order) {
   if (dynamic_playlist_ && current_item_index_.isValid())
     begin += current_item_index_.row() + 1;
 
+  QSettings s;
+  s.beginGroup(Playlist::kSettingsGroup);
+  QStringList prefixes;
+  if ((column == Column_Album || column == Column_Artist ||
+       column == Column_Title) &&
+      s.value(Playlist::kSortIgnorePrefix, false).toBool()) {
+    prefixes = s.value(Playlist::kSortIgnorePrefixList, QString())
+                   .toString()
+                   .split(',');
+    for (QString& prefix : prefixes) {
+      prefix = prefix.trimmed() + ' ';
+    }
+  }
+  s.endGroup();
+
   if (column == Column_Album) {
     // When sorting by album, also take into account discs and tracks.
-    qStableSort(begin, new_items.end(), std::bind(&Playlist::CompareItems,
-                                                  Column_Track, order, _1, _2));
-    qStableSort(begin, new_items.end(),
-                std::bind(&Playlist::CompareItems, Column_Disc, order, _1, _2));
-    qStableSort(begin, new_items.end(), std::bind(&Playlist::CompareItems,
-                                                  Column_Album, order, _1, _2));
+    std::stable_sort(begin, new_items.end(),
+                     std::bind(&Playlist::CompareItems, Column_Track, order, _1,
+                               _2, prefixes));
+    std::stable_sort(begin, new_items.end(),
+                     std::bind(&Playlist::CompareItems, Column_Disc, order, _1,
+                               _2, prefixes));
+    std::stable_sort(begin, new_items.end(),
+                     std::bind(&Playlist::CompareItems, Column_Album, order, _1,
+                               _2, prefixes));
   } else if (column == Column_Filename) {
     // When sorting by full paths we also expect a hierarchical order. This
     // returns a breath-first ordering of paths.
-    qStableSort(
-        begin, new_items.end(),
-        std::bind(&Playlist::CompareItems, Column_Filename, order, _1, _2));
-    qStableSort(begin, new_items.end(),
-                std::bind(&Playlist::ComparePathDepths, order, _1, _2));
+    std::stable_sort(begin, new_items.end(),
+                     std::bind(&Playlist::CompareItems, Column_Filename, order,
+                               _1, _2, prefixes));
+    std::stable_sort(begin, new_items.end(),
+                     std::bind(&Playlist::ComparePathDepths, order, _1, _2));
   } else {
-    qStableSort(begin, new_items.end(),
-                std::bind(&Playlist::CompareItems, column, order, _1, _2));
+    std::stable_sort(
+        begin, new_items.end(),
+        std::bind(&Playlist::CompareItems, column, order, _1, _2, prefixes));
   }
 
   undo_stack_->push(
@@ -1566,7 +1619,7 @@ void Playlist::RemoveItemsWithoutUndo(const QList<int>& indicesIn) {
   // Sort the indices descending because removing elements 'backwards'
   // is easier - indices don't 'move' in the process.
   QList<int> indices = indicesIn;
-  qSort(indices.begin(), indices.end(), DescendingIntLessThan);
+  std::sort(indices.begin(), indices.end(), DescendingIntLessThan);
 
   for (int j = 0; j < indices.count(); j++) {
     int beginning = indices[j], end = indices[j];
@@ -1609,7 +1662,7 @@ bool Playlist::removeRows(QList<int>& rows) {
 
   // start from the end to be sure that indices won't 'move' during
   // the removal process
-  qSort(rows.begin(), rows.end(), qGreater<int>());
+  std::sort(rows.begin(), rows.end(), std::greater<int>());
 
   QList<int> part;
   while (!rows.isEmpty()) {

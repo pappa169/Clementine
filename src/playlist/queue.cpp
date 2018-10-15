@@ -17,13 +17,23 @@
 
 #include "queue.h"
 
+#include <algorithm>
+
 #include <QBuffer>
 #include <QMimeData>
 #include <QtDebug>
 
+#include "core/utilities.h"
+
 const char* Queue::kRowsMimetype = "application/x-clementine-queue-rows";
 
-Queue::Queue(QObject* parent) : QAbstractProxyModel(parent) {}
+Queue::Queue(Playlist* parent)
+    : QAbstractProxyModel(parent), playlist_(parent), total_length_ns_(0) {
+  connect(this, SIGNAL(ItemCountChanged(int)), SLOT(UpdateTotalLength()));
+  connect(this, SIGNAL(TotalLengthChanged(quint64)), SLOT(UpdateSummaryText()));
+
+  UpdateSummaryText();
+}
 
 QModelIndex Queue::mapFromSource(const QModelIndex& source_index) const {
   if (!source_index.isValid()) return QModelIndex();
@@ -77,6 +87,7 @@ void Queue::SourceDataChanged(const QModelIndex& top_left,
 
     emit dataChanged(proxy_index, proxy_index);
   }
+  emit ItemCountChanged(this->ItemCount());
 }
 
 void Queue::SourceLayoutChanged() {
@@ -89,6 +100,7 @@ void Queue::SourceLayoutChanged() {
       --i;
     }
   }
+  emit ItemCountChanged(this->ItemCount());
 }
 
 QModelIndex Queue::index(int row, int column, const QModelIndex& parent) const {
@@ -151,11 +163,69 @@ void Queue::ToggleTracks(const QModelIndexList& source_indexes) {
   }
 }
 
+void Queue::InsertFirst(const QModelIndexList& source_indexes) {
+  for (const QModelIndex& source_index : source_indexes) {
+    QModelIndex proxy_index = mapFromSource(source_index);
+    if (proxy_index.isValid()) {
+      // Already in the queue, so remove it to be reinserted later
+      const int row = proxy_index.row();
+      beginRemoveRows(QModelIndex(), row, row);
+      source_indexes_.removeAt(row);
+      endRemoveRows();
+    }
+  }
+
+  const int rows = source_indexes.count();
+  // Enqueue the tracks at the beginning
+  beginInsertRows(QModelIndex(), 0, rows - 1);
+  int offset = 0;
+  for (const QModelIndex& source_index : source_indexes) {
+    source_indexes_.insert(offset, QPersistentModelIndex(source_index));
+    offset++;
+  }
+  endInsertRows();
+}
+
 int Queue::PositionOf(const QModelIndex& source_index) const {
   return mapFromSource(source_index).row();
 }
 
 bool Queue::is_empty() const { return source_indexes_.isEmpty(); }
+
+int Queue::ItemCount() const { return source_indexes_.length(); }
+
+quint64 Queue::GetTotalLength() const { return total_length_ns_; }
+
+void Queue::UpdateTotalLength() {
+  quint64 total = 0;
+
+  for (QPersistentModelIndex row : source_indexes_) {
+    int id = row.row();
+
+    Q_ASSERT(playlist_->has_item_at(id));
+
+    quint64 length = playlist_->item_at(id)->Metadata().length_nanosec();
+    if (length > 0) total += length;
+  }
+
+  total_length_ns_ = total;
+
+  emit TotalLengthChanged(total);
+}
+
+void Queue::UpdateSummaryText() {
+  QString summary;
+  int tracks = this->ItemCount();
+  quint64 nanoseconds = this->GetTotalLength();
+
+  // TODO: Make the plurals translatable
+  summary += tracks == 1 ? tr("1 track") : tr("%1 tracks").arg(tracks);
+
+  if (nanoseconds)
+    summary += " - [ " + Utilities::WordyTimeNanosec(nanoseconds) + " ]";
+
+  emit SummaryTextChanged(summary);
+}
 
 void Queue::Clear() {
   if (source_indexes_.isEmpty()) return;
@@ -249,7 +319,8 @@ bool Queue::dropMimeData(const QMimeData* data, Qt::DropAction action, int row,
     QList<int> proxy_rows;
     QDataStream stream(data->data(kRowsMimetype));
     stream >> proxy_rows;
-    qStableSort(proxy_rows);  // Make sure we take them in order
+    // Make sure we take them in order
+    std::stable_sort(proxy_rows.begin(), proxy_rows.end());
 
     Move(proxy_rows, row);
   } else if (data->hasFormat(Playlist::kRowsMimetype)) {
@@ -320,7 +391,7 @@ QVariant Queue::headerData(int section, Qt::Orientation orientation,
 
 void Queue::Remove(QList<int>& proxy_rows) {
   // order the rows
-  qStableSort(proxy_rows);
+  std::stable_sort(proxy_rows.begin(), proxy_rows.end());
 
   // reflects immediately changes in the playlist
   layoutAboutToBeChanged();

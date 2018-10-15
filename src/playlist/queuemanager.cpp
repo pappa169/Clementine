@@ -23,6 +23,8 @@
 #include "ui_queuemanager.h"
 #include "ui/iconloader.h"
 
+#include <algorithm>
+
 #include <QKeySequence>
 #include <QShortcut>
 
@@ -73,6 +75,8 @@ void QueueManager::CurrentPlaylistChanged(Playlist* playlist) {
                SLOT(UpdateButtonState()));
     disconnect(current_playlist_->queue(), SIGNAL(layoutChanged()), this,
                SLOT(UpdateButtonState()));
+    disconnect(current_playlist_->queue(), SIGNAL(SummaryTextChanged(QString)),
+               ui_->queue_summary, SLOT(setText(QString)));
     disconnect(current_playlist_, SIGNAL(destroyed()), this,
                SLOT(PlaylistDestroyed()));
   }
@@ -87,6 +91,8 @@ void QueueManager::CurrentPlaylistChanged(Playlist* playlist) {
           SLOT(UpdateButtonState()));
   connect(current_playlist_->queue(), SIGNAL(layoutChanged()), this,
           SLOT(UpdateButtonState()));
+  connect(current_playlist_->queue(), SIGNAL(SummaryTextChanged(QString)),
+          ui_->queue_summary, SLOT(setText(QString)));
   connect(current_playlist_, SIGNAL(destroyed()), this,
           SLOT(PlaylistDestroyed()));
 
@@ -95,11 +101,13 @@ void QueueManager::CurrentPlaylistChanged(Playlist* playlist) {
   connect(ui_->list->selectionModel(),
           SIGNAL(currentChanged(QModelIndex, QModelIndex)),
           SLOT(UpdateButtonState()));
+
+  QTimer::singleShot(0, current_playlist_->queue(), SLOT(UpdateSummaryText()));
 }
 
 void QueueManager::MoveUp() {
   QModelIndexList indexes = ui_->list->selectionModel()->selectedRows();
-  qStableSort(indexes);
+  std::stable_sort(indexes.begin(), indexes.end());
 
   if (indexes.isEmpty() || indexes.first().row() == 0) return;
 
@@ -110,7 +118,7 @@ void QueueManager::MoveUp() {
 
 void QueueManager::MoveDown() {
   QModelIndexList indexes = ui_->list->selectionModel()->selectedRows();
-  qStableSort(indexes);
+  std::stable_sort(indexes.begin(), indexes.end());
 
   if (indexes.isEmpty() ||
       indexes.last().row() == current_playlist_->queue()->rowCount() - 1)

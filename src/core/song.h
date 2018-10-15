@@ -73,6 +73,10 @@ class Song {
   static const QString kBindSpec;
   static const QString kUpdateSpec;
 
+  static const QStringList kIntColumns;
+  static const QStringList kFloatColumns;
+  static const QStringList kDateColumns;
+
   static const QStringList kFtsColumns;
   static const QString kFtsColumnSpec;
   static const QString kFtsBindSpec;
@@ -101,6 +105,9 @@ class Song {
     Type_TrueAudio = 11,
     Type_Cdda = 12,
     Type_OggOpus = 13,
+    Type_WavPack = 14,
+    Type_Spc = 15,
+    Type_VGM = 16,
     Type_Stream = 99,
   };
   static QString TextForFiletype(FileType type);

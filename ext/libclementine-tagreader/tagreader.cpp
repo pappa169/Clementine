@@ -42,6 +42,7 @@
 #ifdef TAGLIB_HAS_OPUS
 #include <opusfile.h>
 #endif
+#include <apetag.h>
 #include <oggflacfile.h>
 #include <popularimeterframe.h>
 #include <speexfile.h>
@@ -52,13 +53,15 @@
 #include <unsynchronizedlyricsframe.h>
 #include <vorbisfile.h>
 #include <wavfile.h>
+#include <wavpackfile.h>
 
 #include <sys/stat.h>
 
-#include "fmpsparser.h"
 #include "core/logging.h"
 #include "core/messagehandler.h"
 #include "core/timeconstants.h"
+#include "fmpsparser.h"
+#include "gmereader.h"
 
 // Taglib added support for FLAC pictures in 1.7.0
 #if (TAGLIB_MAJOR_VERSION > 1) || \
@@ -99,7 +102,7 @@ TagLib::String StdStringToTaglibString(const std::string& s) {
 TagLib::String QStringToTaglibString(const QString& s) {
   return TagLib::String(s.toUtf8().constData(), TagLib::String::UTF8);
 }
-}
+}  // namespace
 
 const char* TagReader::kMP4_FMPS_Rating_ID =
     "----:com.apple.iTunes:FMPS_Rating";
@@ -114,7 +117,7 @@ namespace {
 const char* kMP4_OriginalYear_ID = "----:com.apple.iTunes:ORIGINAL YEAR";
 const char* kASF_OriginalDate_ID = "WM/OriginalReleaseTime";
 const char* kASF_OriginalYear_ID = "WM/OriginalReleaseYear";
-}
+}  // namespace
 
 TagReader::TagReader()
     : factory_(new TagLibFileRefFactory),
@@ -137,6 +140,9 @@ void TagReader::ReadFile(const QString& filename,
   std::unique_ptr<TagLib::FileRef> fileref(factory_->GetFileRef(filename));
   if (fileref->isNull()) {
     qLog(Info) << "TagLib hasn't been able to read " << filename << " file";
+
+    // Try fallback -- GME filetypes
+    GME::ReadFile(info, song);
     return;
   }
 
@@ -300,8 +306,9 @@ void TagReader::ReadFile(const QString& filename,
 
       if (items.contains(kMP4_FMPS_Rating_ID)) {
         float rating =
-            TStringToQString(items[kMP4_FMPS_Rating_ID].toStringList().toString(
-                                 '\n')).toFloat();
+            TStringToQString(
+                items[kMP4_FMPS_Rating_ID].toStringList().toString('\n'))
+                .toFloat();
         if (song->rating() <= 0 && rating > 0) {
           song->set_rating(rating);
         }
@@ -585,8 +592,9 @@ void TagReader::SetVorbisComments(
   vorbis_comments->addField("CONTENT GROUP",
                             StdStringToTaglibString(song.grouping()), true);
   vorbis_comments->addField(
-      "BPM", QStringToTaglibString(
-                 song.bpm() <= 0 - 1 ? QString() : QString::number(song.bpm())),
+      "BPM",
+      QStringToTaglibString(song.bpm() <= 0 - 1 ? QString()
+                                                : QString::number(song.bpm())),
       true);
   vorbis_comments->addField(
       "DISCNUMBER",
@@ -603,10 +611,9 @@ void TagReader::SetVorbisComments(
                             StdStringToTaglibString(song.albumartist()), true);
   vorbis_comments->removeField("ALBUM ARTIST");
 
-  vorbis_comments->addField("LYRICS",
-                            StdStringToTaglibString(song.lyrics()), true);
+  vorbis_comments->addField("LYRICS", StdStringToTaglibString(song.lyrics()),
+                            true);
   vorbis_comments->removeField("UNSYNCEDLYRICS");
-
 }
 
 void TagReader::SetFMPSStatisticsVorbisComments(
@@ -659,6 +666,8 @@ pb::tagreader::SongMetadata_Type TagReader::GuessFileType(
     return pb::tagreader::SongMetadata_Type_WAV;
   if (dynamic_cast<TagLib::TrueAudio::File*>(fileref->file()))
     return pb::tagreader::SongMetadata_Type_TRUEAUDIO;
+  if (dynamic_cast<TagLib::WavPack::File*>(fileref->file()))
+    return pb::tagreader::SongMetadata_Type_WAVPACK;
 
   return pb::tagreader::SongMetadata_Type_UNKNOWN;
 }
@@ -714,6 +723,17 @@ bool TagReader::SaveFile(const QString& filename,
     tag->itemListMap()["aART"] = TagLib::StringList(song.albumartist().c_str());
     tag->itemListMap()["cpil"] =
         TagLib::StringList(song.compilation() ? "1" : "0");
+  } else if (TagLib::WavPack::File* file =
+                 dynamic_cast<TagLib::WavPack::File*>(fileref->file())) {
+    TagLib::APE::Tag* tag = file->APETag(true);
+    if (!tag) return false;
+    tag->setArtist(StdStringToTaglibString(song.artist()));
+    tag->setAlbum(StdStringToTaglibString(song.album()));
+    tag->setTitle(StdStringToTaglibString(song.title()));
+    tag->setGenre(StdStringToTaglibString(song.genre()));
+    tag->setComment(StdStringToTaglibString(song.comment()));
+    tag->setYear(song.year());
+    tag->setTrack(song.track());
   }
 
   // Handle all the files which have VorbisComments (Ogg, OPUS, ...) in the same
